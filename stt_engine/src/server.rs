@@ -1,10 +1,10 @@
 use core::slice;
-use std::{collections::HashMap, io::{self, Read, Write}, mem::size_of, sync::Arc};
+use std::{mem::size_of, sync::Arc, time::Duration};
 
 use derive_new::new;
-use mio::{event::Event, net::{TcpListener, TcpStream}, Events, Interest, Poll, Registry, Token};
+use tokio::{io::AsyncReadExt, net::TcpListener, time::sleep};
 
-use crate::{channel::channel::{ChannelElem, ChannelError, ChunkBytes, DefaultIOReader, DefaultIOWriter, IOChannel, IOChannelBuilder, IOChunk}, sherpa::Sherpa, thread_pool::ThreadPool};
+use crate::{channel::channel::{ChannelElem, ChannelError, ChunkBytes, DefaultIOReader, DefaultIOWriter, IOChannel, IOChannelBuilder, IOChunk}, sherpa::Sherpa};
 
 pub(crate) const CHUNK_PAYLOAD_LEN: usize = 6400;
 
@@ -67,32 +67,30 @@ impl SherpaChannel {
     }
 }
 
-pub(crate) struct SherpaPipline<'a> {
+pub(crate) struct SherpaPipline {
     token_id: usize,
     chunk_id: u32,
     sherpa: Arc<Sherpa>,
     channel: Arc<SherpaChannel>,
-    thread_pool: &'a ThreadPool,
 }
 
-impl<'a> SherpaPipline<'a> {
-    pub(crate) fn new(token_id: usize, sherpa_channel: SherpaChannel, thread_pool: &'a ThreadPool) -> Self {
+impl SherpaPipline {
+    pub(crate) fn new(token_id: usize, sherpa_channel: SherpaChannel) -> Self {
         Self {
             token_id,
             chunk_id: 0,
             sherpa: Arc::new(Sherpa::new()),
             channel: Arc::new(sherpa_channel),
-            thread_pool,
         }
     }
 }
 
-impl<'a> SherpaPipline<'a> {
-    pub(crate) fn init(&self, notify: impl FnOnce(usize, usize, String) + Copy + Send + 'static) {
+impl SherpaPipline {
+    pub(crate) fn init(&self, notify: impl Fn(usize, usize, String) + Send + 'static) {
         let input_channel = self.channel.clone();
         let sherpa = self.sherpa.clone();
 
-        self.thread_pool.execute(move || {
+        tokio::spawn(async move {
             let handler = sherpa.init(SHERPA_TOKENS, SHERPA_ENCODER, SHERPA_DECODER, SHERPA_JOINER);
 
             loop {
@@ -112,16 +110,15 @@ impl<'a> SherpaPipline<'a> {
                     }
                 }
             }
-
             sherpa.close(handler);
         });
     }
 
-    pub(crate) fn write(&mut self, received_data: &[ChannelElem], token_id: usize) -> Result<(), ChannelError> {
+    pub(crate) fn write(&mut self, received_data: &[ChannelElem]) -> Result<(), ChannelError> {
         let mut chunk_bytes = [0u8; size_of::<AudioChunk>()];
         chunk_bytes[0] = 0xee;
         chunk_bytes[1] = 0xff;
-        chunk_bytes[2] = token_id as u8;
+        chunk_bytes[2] = self.token_id as u8;
         let chunk_ids = (self.chunk_id as u32).to_le_bytes();
         self.chunk_id += 1;
         chunk_bytes[3] = 0 as u8;
@@ -132,206 +129,74 @@ impl<'a> SherpaPipline<'a> {
         chunk_bytes[8..].copy_from_slice(&received_data);
         self.channel.write(AudioChunk::from_chunk_bytes(&chunk_bytes))
     }
-}
 
-fn next(current: &mut Token) -> Token {
-    let next = current.0;
-    current.0 += 1;
-    Token(next)
-}
-
-fn would_block(err: &io::Error) -> bool {
-    err.kind() == io::ErrorKind::WouldBlock
-}
-
-fn interrupted(err: &io::Error) -> bool {
-    err.kind() == io::ErrorKind::Interrupted
-}
-
-pub fn run(addr: &str, thread_nums: usize, events_num: usize) -> io::Result<()> {
-    let thread_pool = ThreadPool::new(thread_nums);
-    let mut sherpa_piplines = Vec::<SherpaPipline>::with_capacity(thread_nums);
-
-    for _i in 0..thread_nums {
-        let input_channel = SherpaChannel::create(512 * size_of::<AudioChunk>());
-        let sherpa_pipline = SherpaPipline::new(0, input_channel, &thread_pool);
-        sherpa_pipline.init(|channel_id, chunk_id, result| {
-            println!("{}-{}: {}", channel_id, chunk_id, result);
-        });
-        sherpa_piplines.push(sherpa_pipline);
+    pub(crate) fn stop(&mut self) -> Result<(), ChannelError> {
+        let mut chunk_bytes = [0u8; size_of::<AudioChunk>()];
+        chunk_bytes[0] = 0xee;
+        chunk_bytes[1] = 0xff;
+        chunk_bytes[2] = self.token_id as u8;
+        let chunk_ids = (self.chunk_id as u32).to_le_bytes();
+        self.chunk_id += 1;
+        chunk_bytes[3] = 1 as u8;
+        chunk_bytes[4] = chunk_ids[0];
+        chunk_bytes[5] = chunk_ids[1];
+        chunk_bytes[6] = chunk_ids[2];
+        chunk_bytes[7] = chunk_ids[3];
+        self.channel.write(AudioChunk::from_chunk_bytes(&chunk_bytes))
     }
+}
 
-    const SERVER: Token = Token(0);
-
-    let mut poll = Poll::new()?;
-    let mut events = Events::with_capacity(events_num);
-    let addr = addr.parse().unwrap();
-    let mut server = TcpListener::bind(addr)?;
-    poll.registry()
-        .register(&mut server, SERVER, Interest::READABLE)?;
-    let mut connections = HashMap::new();
-    let mut unique_token = Token(SERVER.0 + 1);
-
-    println!("You can connect to the server using `nc`:");
-    println!(" $ nc {}", addr);
-    println!("You'll see our welcome message and anything you type will be printed here.");
+#[tokio::main(worker_threads = 40)]
+pub async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind(addr).await?;
+    let mut token_id = 0;
 
     loop {
-        if let Err(err) = poll.poll(&mut events, None) {
-            if interrupted(&err) {
-                continue;
+        let (mut socket, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            println!("handle {:?}", socket);
+            if let Err(e) = handle_client(&mut socket, token_id).await {
+                println!("error handle {:?}: {:?}", socket, e);
             }
-            return Err(err);
-        }
-
-        for event in events.iter() {
-            match event.token() {
-                SERVER => loop {
-                    // Received an event for the TCP server socket, which
-                    // indicates we can accept an connection.
-                    let (mut connection, address) = match server.accept() {
-                        Ok((connection, address)) => (connection, address),
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            // If we get a `WouldBlock` error we know our
-                            // listener has no more incoming connections queued,
-                            // so we can return to polling and wait for some
-                            // more.
-                            break;
-                        }
-                        Err(e) => {
-                            // If it was any other kind of error, something went
-                            // wrong and we terminate with an error.
-                            return Err(e);
-                        }
-                    };
-
-                    println!("Accepted connection from: {}", address);
-
-                    let token = next(&mut unique_token);
-                    poll.registry().register(
-                        &mut connection,
-                        token,
-                        Interest::READABLE.add(Interest::WRITABLE),
-                    )?;
-
-                    connections.insert(token, connection);
-                },
-                token => {
-                    // Maybe received an event for a TCP connection.
-                    let done = if let Some(connection) = connections.get_mut(&token) {
-                        handle_connection_event(poll.registry(), connection, event, &mut sherpa_piplines)?
-                    } else {
-                        // Sporadic events happen, we can safely ignore them.
-                        false
-                    };
-                    if done {
-                        if let Some(mut connection) = connections.remove(&token) {
-                            println!("disconnect: {:?}", connection);
-                            poll.registry().deregister(&mut connection)?;
-                            
-                            for sherpa_pipline in sherpa_piplines.iter_mut() {
-                                if sherpa_pipline.token_id == token.0 {
-                                    sherpa_pipline.token_id = 0;
-                                    sherpa_pipline.chunk_id = 0;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        });
+        token_id += 1;
     }
 }
 
-fn handle_connection_event(
-    registry: &Registry,
-    connection: &mut TcpStream,
-    event: &Event,
-    sherpa_piplines: &mut Vec::<SherpaPipline>,
-) -> io::Result<bool> {
-    if event.is_writable() {
-        let ret = "echo";
-        match connection.write(ret.as_bytes()) {
-            // We want to write the entire `DATA` buffer in a single go. If we
-            // write less we'll return a short write error (same as
-            // `io::Write::write_all` does).
-            Ok(n) if n < ret.len() => return Err(io::ErrorKind::WriteZero.into()),
-            Ok(_) => {
-                // After we've written something we'll reregister the connection
-                // to only respond to readable events.
-                registry.reregister(connection, event.token(), Interest::READABLE)?
-            }
-            // Would block "errors" are the OS's way of saying that the
-            // connection is not actually ready to perform this I/O operation.
-            Err(ref err) if would_block(err) => {}
-            // Got interrupted (how rude!), we'll try again.
-            Err(ref err) if interrupted(err) => {
-                return handle_connection_event(registry, connection, event, sherpa_piplines)
-            }
-            // Other errors we'll consider fatal.
-            Err(err) => return Err(err),
-        }
-    }
+async fn handle_client(socket: &mut tokio::net::TcpStream, token_id: usize) -> Result<(), ChannelError> {
+    let mut buff_in = [0; CHUNK_PAYLOAD_LEN];
+    let mut read_len = 0;
 
-    if event.is_readable() {
-        let mut connection_closed = false;
-        let mut received_data = vec![0; CHUNK_PAYLOAD_LEN];
-        let mut bytes_read = 0;
-        // We can (maybe) read from the connection.
-        loop {
-            match connection.read(&mut received_data[bytes_read..]) {
-                Ok(0) => {
-                    // Reading 0 bytes means the other side has closed the
-                    // connection or is done writing, then so are we.
-                    connection_closed = true;
+    let mut sherpa_pipline = SherpaPipline::new(token_id, SherpaChannel::create(128 * size_of::<AudioChunk>()));
+    sherpa_pipline.init(move |channel_id, chunk_id, ret| {
+        println!("receive: {}-{} {}", channel_id, chunk_id, ret);
+    });
+
+    loop {
+        match tokio::select! {
+            read_result = socket.read(&mut buff_in[read_len..]) => {
+                match read_result {
+                    Ok(read_len) => Ok(read_len),
+                    Err(_) => Err(()),
+                }
+            }
+            _ = sleep(Duration::from_millis(30000)) => {
+                Err(())
+            }
+        } {
+                Ok(0)  => break,
+                Ok(n) => {
+                    read_len += n;
+                    if read_len == CHUNK_PAYLOAD_LEN {
+                        sherpa_pipline.write(&buff_in).unwrap();
+                        read_len = 0;
+                    }
+                },
+                Err(_) => {
+                    eprintln!("Error reading from socket");
                     break;
                 }
-                Ok(n) => {
-                    bytes_read += n;
-                    if bytes_read == received_data.len() {
-                        let select_idx = select_sherpa_pipline(sherpa_piplines, event.token().0);
-                        sherpa_piplines[select_idx].write(&received_data, event.token().0).unwrap();
-                        // bytes_read = 0;
-                        registry.reregister(connection, event.token(), Interest::WRITABLE).unwrap();
-                        break;
-                    }
-                }
-                // Would block "errors" are the OS's way of saying that the
-                // connection is not actually ready to perform this I/O operation.
-                Err(ref err) if would_block(err) => break,
-                Err(ref err) if interrupted(err) => continue,
-                // Other errors we'll consider fatal.
-                Err(err) => return Err(err),
-            }
-        }
-
-        if connection_closed {
-            println!("Connection closed");
-            return Ok(true);
         }
     }
-
-    Ok(false)
-}
-
-fn select_sherpa_pipline(sherpa_piplines: &mut Vec<SherpaPipline>, token_id: usize) -> usize {
-    let mut selected = 0;
-    for i in 0..sherpa_piplines.len() {
-        if sherpa_piplines[i].token_id == token_id {
-            selected = i;
-            break;
-        }
-    }
-
-    if selected == 0 {
-        for i in 0..sherpa_piplines.len() {
-            if sherpa_piplines[i].token_id == 0 {
-                selected = i;
-                sherpa_piplines[i].token_id = token_id;
-                break;
-            }
-        }
-    }
-
-    selected
+    sherpa_pipline.stop()
 }

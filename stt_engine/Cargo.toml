@@ -8,5 +8,5 @@ edition = "2021"
 [dependencies]
 derive-new = "0.6.0"
 hound = "3.5.1"
-mio = { version = "0.8.11", features = ["net", "os-poll"] }
 num-traits = "0.2.18"
+tokio = { version = "1.37.0", features = ["full"] }
