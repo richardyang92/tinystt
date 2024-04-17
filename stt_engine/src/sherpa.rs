@@ -7,6 +7,9 @@ pub struct SherpaHandle {
     pub stream: *const (),
 }
 
+unsafe impl Send for SherpaHandle { }
+unsafe impl Sync for SherpaHandle { }
+
 #[link(name = "sherpa")]
 extern "C" {
     pub fn sherpa_init(tokens: *const ::std::os::raw::c_char,

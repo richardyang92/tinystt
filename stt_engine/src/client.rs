@@ -3,9 +3,9 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 use crate::server::CHUNK_PAYLOAD_LEN;
 
 #[tokio::main]
-pub async fn run(addr: &'static str) {
+pub async fn run(addr: &'static str, client_nums: usize) {
     let mut futures = vec![];
-    for i in 0..30 {
+    for i in 0..client_nums {
         let future = tokio::spawn(async move {
             let mut stream = TcpStream::connect(addr).await.unwrap();
             let mut reader = hound::WavReader::open(format!("./data/segment/split_part_{}.wav", i + 1)).unwrap();
