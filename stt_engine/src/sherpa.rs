@@ -17,6 +17,7 @@ extern "C" {
                        decoder: *const ::std::os::raw::c_char,
                        joiner: *const ::std::os::raw::c_char) -> SherpaHandle;
     pub fn sherpa_transcribe(handle: SherpaHandle, samples: *const f32, len: ::std::os::raw::c_int) -> *const ::std::os::raw::c_char;
+    pub fn sherpa_reset(handle: SherpaHandle);
     pub fn sherpa_close(handle: SherpaHandle);
 }
 
@@ -41,6 +42,10 @@ impl Sherpa {
         let result = unsafe { sherpa_transcribe(handle, samples.as_ptr(), len) };
         let c_str = unsafe { ::std::ffi::CStr::from_ptr(result) };
         c_str.to_str().unwrap_or("").to_string() // Error handling should be more robust in production code
+    }
+
+    pub fn reset(&self, handle: SherpaHandle) {
+        unsafe { sherpa_reset(handle) };
     }
 
     pub fn close(&self, handle: SherpaHandle) {

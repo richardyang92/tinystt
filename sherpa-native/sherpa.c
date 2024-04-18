@@ -70,6 +70,10 @@ const char* sherpa_transcribe(SherpaHandle handle,
     return ret;
 }
 
+void sherpa_reset(SherpaHandle handle) {
+    Reset(handle.recognizer, handle.stream);
+}
+
 void sherpa_close(SherpaHandle handle) {
     float tail_paddings[4800] = { 0 };
     AcceptWaveform(handle.stream, SAMPLE_RATE, tail_paddings, 4800);

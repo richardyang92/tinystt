@@ -1,6 +1,6 @@
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
 
-use crate::server::CHUNK_PAYLOAD_LEN;
+use crate::server::{CHUNK_PAYLOAD_LEN, TRANSCRIBE_MAX_LEN};
 
 #[tokio::main]
 pub async fn run(addr: &'static str, client_nums: usize) {
@@ -23,12 +23,29 @@ pub async fn run(addr: &'static str, client_nums: usize) {
                 stream.write_all(&samples[s..e]).await.unwrap();
             }
 
+            let mut buff = [0; TRANSCRIBE_MAX_LEN];
+            loop {
+                match stream.read(&mut buff).await {
+                    Ok(0) => break,
+                    Ok(read_len) => {
+                        let transcribe_data = String::from_utf8_lossy(&buff[0..read_len]);
+                        println!("receive: channel-{} {}", i, transcribe_data);
+                        if transcribe_data.eq("end") {
+                            break;
+                        }
+                    },
+                    Err(_) => break,
+                }
+            }
+
             stream.shutdown().await.unwrap();
         });
         futures.push(future);
     }
 
     for future in futures {
-        future.await.unwrap();
+        if let Err(e) = future.await {
+            println!("join error: {:?}", e.to_string());
+        }
     }
 }
