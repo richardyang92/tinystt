@@ -25,11 +25,11 @@ pub(crate) mod buffer {
         }
 
         pub(crate) fn get(&self, idx: usize) -> E {
-            unsafe { *self.pointer.as_ptr().offset(idx as isize) }
+            unsafe { *self.pointer.as_ptr().add(idx) }
         }
 
         pub(crate) fn set(&self, idx: usize, val: E) {
-            unsafe { *self.pointer.as_ptr().offset(idx as isize) = val.clone(); } 
+            unsafe { *self.pointer.as_ptr().add(idx) = val; } 
         }
 
         pub(crate) fn iter(&self) -> RawDataIter<E> {
@@ -49,10 +49,8 @@ pub(crate) mod buffer {
 
     impl<E> Drop for RawData<E> {
         fn drop(&mut self) {
-            if self.capacity > 0 {
-                if mem::needs_drop::<E>() {
-                    self.take_as_vec();
-                }
+            if self.capacity > 0 && mem::needs_drop::<E>() {
+                self.take_as_vec();
             }
         }
     }
@@ -69,7 +67,7 @@ pub(crate) mod buffer {
         fn next(&mut self) -> Option<Self::Item> {
             if self.index < self.data.capacity {
                 let value = unsafe {
-                    *self.data.pointer.as_ptr().offset(self.index as isize)
+                    *self.data.pointer.as_ptr().add(self.index)
                 };
                 self.index += 1;
                 Some(value)
@@ -112,13 +110,11 @@ pub(crate) mod buffer {
                 self.capacity - front + rear
             };
 
-            if size == 0 {
-                if !self.raw_data.lock()
-                    .unwrap()
-                    .iter()
-                    .all(|item| item == Zero::zero()) {
-                    size = self.capacity;
-                }
+            if size == 0 && !self.raw_data.lock()
+                .unwrap()
+                .iter()
+                .all(|item| item == Zero::zero()) {
+                size = self.capacity;
             }
             size
         }
@@ -137,9 +133,9 @@ pub(crate) mod buffer {
 
             let rear = self.rear.load(Ordering::SeqCst);
 
-            for i in 0..len {
+            for (i, item) in buff_in.iter().enumerate().take(len) {
                 let idx = (rear + i) % self.capacity;
-                data.set(idx, buff_in[i]);
+                data.set(idx, *item);
                 written += 1;
             }
             self.rear.store((rear + written) % self.capacity, Ordering::SeqCst);
@@ -160,9 +156,9 @@ pub(crate) mod buffer {
             }
 
             let front = self.front.load(Ordering::SeqCst);
-            for i in 0..len {
+            for (i, item) in buff_out.iter_mut().enumerate().take(len) {
                 let idx = (front + i) % self.capacity;
-                buff_out[i] = data.get(idx);
+                *item = data.get(idx);
                 data.set(idx, Zero::zero());
                 readed += 1;
             }
@@ -177,7 +173,7 @@ pub(crate) mod buffer {
     unsafe impl<E> Sync for IOInnerBuffer<E> { }
 }
 
-pub(crate) mod channel {
+pub(crate) mod default {
     use std::{marker::PhantomData, mem::size_of, sync::Arc};
 
     use derive_new::new;
@@ -217,7 +213,7 @@ pub(crate) mod channel {
         fn read(&self, inner_buffer: Arc<InnerBuffer>, buff_out: &mut [ChannelElem], len: usize) -> Result<usize, BuffError>;
     }
 
-    impl<'a, W, R, C> IOChannel<W, R, C>
+    impl<W, R, C> IOChannel<W, R, C>
     where
         W: IOWriter + Copy + Send + 'static,
         R: IOReader + Copy + Send + 'static,
@@ -273,7 +269,7 @@ pub(crate) mod channel {
         io_reader: Option<R>,
     }
 
-    impl<'a, W, R> IOChannelBuilder<W, R>
+    impl<W, R> IOChannelBuilder<W, R>
     where
         W: IOWriter + Copy + Send + 'static,
         R: IOReader + Copy + Send + 'static,

@@ -6,7 +6,7 @@ use derive_new::new;
 use signal_hook::{consts::{SIGINT, SIGTERM}, iterator::Signals};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener, time::sleep};
 
-use crate::{channel::channel::{ChannelElem, ChannelError, ChunkBytes, DefaultIOReader, DefaultIOWriter, IOChannel, IOChannelBuilder, IOChunk}, sherpa::{Sherpa, SherpaHandle}};
+use crate::{channel::default::{ChannelElem, ChannelError, ChunkBytes, DefaultIOReader, DefaultIOWriter, IOChannel, IOChannelBuilder, IOChunk}, sherpa::{Sherpa, SherpaHandle}};
 
 pub(crate) const CHUNK_PAYLOAD_LEN: usize = 6400;
 pub(crate) const TRANSCRIBE_MAX_LEN: usize = 256;
@@ -152,9 +152,7 @@ impl SherpaPipline {
         chunk_bytes[1] = 0xff;
         chunk_bytes[2] = pay_load.len() as u8;
         
-        for i in 0..pay_load.len() {
-            chunk_bytes[i + 3] = pay_load[i];
-        }
+        chunk_bytes[3..(pay_load.len() + 3)].copy_from_slice(pay_load);
         TranscribeResult::from_chunk_bytes(&chunk_bytes)
     }
 
@@ -184,16 +182,19 @@ impl SherpaPipline {
                         .collect::<Vec<f32>>();
                     let ret = sherpa.transcribe(*handler, &sample);
                     if !ret.eq("") {
-                        match {
+                        let res = {
                             let pay_load = ret.as_bytes();
                             println!("pay_load len: {}", pay_load.len());
-                            let transcribe_result = Self::create_transcribe(&pay_load);
+                            let transcribe_result = Self::create_transcribe(pay_load);
                             output_channel.write(transcribe_result)
-                        } {
+                        };
+                        match res {
                             Ok(_) => on_notify(audio_chunk.channel_id as usize, audio_chunk.chunk_id as usize, ret),
                             Err(_) => eprintln!("write transcribe result failed"),
                         }
                     }
+                } else {
+                    let _ = sleep(Duration::from_millis(10)).await;
                 }
             }
         });
@@ -202,10 +203,10 @@ impl SherpaPipline {
     pub(crate) async fn poll_result(&self) -> Result<TranscribeResult, ChannelError> {
         let output_channel = self.output_channel.clone();
         if let Ok(transcribe_result) = output_channel.read() {
-            return Ok(transcribe_result);
+            Ok(transcribe_result)
         } else {
-            let _ = sleep(Duration::from_millis(50)).await;
-            return Err(ChannelError::ReadChunkFailed);
+            let _ = sleep(Duration::from_millis(10)).await;
+            Err(ChannelError::ReadChunkFailed)
         }
     }
 
@@ -215,12 +216,12 @@ impl SherpaPipline {
         chunk_bytes[1] = 0xff;
         chunk_bytes[2] = self.sherpa_id as u8;
         let chunk_ids = chunk_id.to_le_bytes();
-        chunk_bytes[3] = if is_end { 1 as u8 } else { 0 as u8 };
+        chunk_bytes[3] = if is_end { 1_u8 } else { 0_u8 };
         chunk_bytes[4] = chunk_ids[0];
         chunk_bytes[5] = chunk_ids[1];
         chunk_bytes[6] = chunk_ids[2];
         chunk_bytes[7] = chunk_ids[3];
-        chunk_bytes[8..].copy_from_slice(&received_data);
+        chunk_bytes[8..].copy_from_slice(received_data);
         self.input_channel.write(AudioChunk::from_chunk_bytes(&chunk_bytes))
     }
 
@@ -289,7 +290,7 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
                     });
                     
                     tokio::spawn(async move {
-                        let max_error_count = 5 * max_clients;
+                        let max_error_count = 10 * max_clients;
                         if let Err(e) = handle_client(&mut socket, sherpa_pipline, max_error_count).await {
                             eprintln!("error handle {:?}: {:?}", socket, e);
                         };
@@ -302,20 +303,17 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
         })
     };
 
-    let mut signals = Signals::new(&[SIGINT, SIGTERM]).unwrap();
+    let mut signals = Signals::new([SIGINT, SIGTERM]).unwrap();
     let sherpa_piplines = sherpa_piplines.clone();
     tokio::spawn(async move {
-        for signal in signals.forever() {
+        if let Some(signal) = signals.forever().next() {
             match signal {
                 SIGINT | SIGTERM => {
                     println!("Received signal {:?}, exiting gracefully.", signal);
-                    let mut sherpa_id = 0;
-                    for sherpa_pipline in sherpa_piplines.read().unwrap().iter() {
+                    for (sherpa_id, sherpa_pipline) in sherpa_piplines.read().unwrap().iter().enumerate() {
                         sherpa_pipline.stop();
                         println!("stop sherpa pipline-{}", sherpa_id);
-                        sherpa_id += 1;
                     }
-                    break;
                 }
                 _ => unreachable!(),
             }
@@ -328,14 +326,14 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
 
 enum SherpaResult {
     Read(usize),
-    Write(TranscribeResult),
+    Write(Box<TranscribeResult>),
 }
 
 #[derive(Debug, PartialEq)]
 enum SherpaError {
-    SocketError,
+    SocketReadFailed,
     TranscribeError,
-    TimeoutError,
+    Timeout,
 }
 
 async fn handle_client(
@@ -359,17 +357,17 @@ async fn handle_client(
             read_result = socket.read(&mut buff_in[read_len..]) => {
                 match read_result {
                     Ok(read_len) => Ok(SherpaResult::Read(read_len)),
-                    Err(_) => Err(SherpaError::SocketError),
+                    Err(_) => Err(SherpaError::SocketReadFailed),
                 }
             }
             transcribe_result = sherpa_pipline.poll_result() => {
                 match transcribe_result {
-                    Ok(transcribe_result) => Ok(SherpaResult::Write(transcribe_result)),
+                    Ok(transcribe_result) => Ok(SherpaResult::Write(Box::new(transcribe_result))),
                     Err(_) => Err(SherpaError::TranscribeError),
                 }
             }
             _ = sleep(Duration::from_secs(15)) => {
-                Err(SherpaError::TimeoutError)
+                Err(SherpaError::Timeout)
             }
         } {
             Ok(SherpaResult::Read(0)) => break,
@@ -382,7 +380,7 @@ async fn handle_client(
                 }
             },
             Ok(SherpaResult::Write(transcribe_result)) => {
-                match socket.write_all(&transcribe_result.get_result()).await {
+                match socket.write_all(transcribe_result.get_result()).await {
                     Ok(_) => error_count = 0,
                     Err(_) => break,
                 }
@@ -397,7 +395,7 @@ async fn handle_client(
         }
     }
 
-    while let Err(_) = socket.write_all(&"end".as_bytes()).await {
+    while (socket.write_all("end".as_bytes()).await).is_err() {
         sleep(Duration::from_millis(10)).await
     }
     socket.shutdown().await.unwrap();
