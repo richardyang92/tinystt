@@ -13,13 +13,9 @@ const char* SHERPA_JOINER = "../sherpa-onnx/joiner-epoch-20-avg-1-chunk-16-left-
 // const char* SHERPA_JOINER = "../sherpa-onnx-tiny/96/joiner-epoch-99-avg-1.onnx";
 
 int main() {
-    // const char* pcm_file = "output.pcm";
-    const char* pcm_file = "/Users/yangyang/ThirdParty/whisper-repo/whisper.cpp/tests/r1.pcm";
-
-    if (!sherpa_init(SHERPA_TOKENS, SHERPA_ENCODER, SHERPA_DECODER, SHERPA_JOINER)) {
-        printf("sherpa init failed!\n");
-        return -1;
-    }
+    const char* pcm_file = "output.pcm";
+    // const char* pcm_file = "/Users/yangyang/ThirdParty/whisper-repo/whisper.cpp/tests/r1.pcm";
+    SherpaHandle handler = sherpa_init(SHERPA_TOKENS, SHERPA_ENCODER, SHERPA_DECODER, SHERPA_JOINER);
 
     FILE* fp = fopen(pcm_file, "rb");
     if (fp == NULL) {
@@ -29,6 +25,8 @@ int main() {
 
     unsigned char buff[6400];
     int read_len = 0;
+
+    char ret[MAX_SUPPORT_TOKENS];
 
     do {
         read_len = fread(buff, sizeof(unsigned char), 6400, fp);
@@ -45,9 +43,10 @@ int main() {
             sample[k] /= 32767.0;
         }
 
-        const char* ret = sherpa_transcribe(sample, 3200);
+        sherpa_transcribe(handler, ret, sample, 3200);
         printf("ret: %s\n", ret);
     } while (read_len > 0);
     
+    sherpa_close(handler);
     return 0;
 }

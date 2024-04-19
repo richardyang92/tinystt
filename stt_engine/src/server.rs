@@ -290,7 +290,7 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
                     });
                     
                     tokio::spawn(async move {
-                        let max_error_count = 10 * max_clients;
+                        let max_error_count = 100 * max_clients;
                         if let Err(e) = handle_client(&mut socket, sherpa_pipline, max_error_count).await {
                             eprintln!("error handle {:?}: {:?}", socket, e);
                         };

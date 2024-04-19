@@ -43,9 +43,7 @@ SherpaHandle sherpa_init(const char* tokens, const char* encoder,
     return handle;
 }
 
-const char* sherpa_transcribe(SherpaHandle handle,
-    float* samples, int len) {
-    
+void sherpa_transcribe(SherpaHandle handle, char* result, float* samples, int len) {
     AcceptWaveform(handle.stream, SAMPLE_RATE, samples, len);
     while (IsOnlineStreamReady(handle.recognizer, handle.stream)) {
       DecodeOnlineStream(handle.recognizer, handle.stream);
@@ -54,9 +52,9 @@ const char* sherpa_transcribe(SherpaHandle handle,
     const SherpaOnnxOnlineRecognizerResult *r =
         GetOnlineStreamResult(handle.recognizer, handle.stream);
     
-    char ret_buf[2048] = {0};
+    memset(result, 0, MAX_SUPPORT_TOKENS);
     if (strlen(r->text)) {
-      strcat(ret_buf, r->text);
+      strcat(result, r->text);
     }
     
     if (IsEndpoint(handle.recognizer, handle.stream)) {
@@ -64,10 +62,6 @@ const char* sherpa_transcribe(SherpaHandle handle,
     }
 
     DestroyOnlineRecognizerResult(r);
-    
-    const char ret[strlen(ret_buf)];
-    strcpy(ret, ret_buf);
-    return ret;
 }
 
 void sherpa_reset(SherpaHandle handle) {
