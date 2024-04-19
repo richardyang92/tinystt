@@ -295,6 +295,7 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
                         } else {
                             (((max_clients - 1) as f32 / 10.0f32) * 100.0f32) as usize
                         };
+
                         if let Err(e) = handle_client(&mut socket, sherpa_pipline, max_error_count).await {
                             eprintln!("error handle {:?}: {:?}", socket, e);
                         };
