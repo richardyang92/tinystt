@@ -249,7 +249,7 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
         let mut sherpa_pipline = SherpaPipline::new(
             i,
             InputChannel::create(128 * size_of::<AudioChunk>()),
-        OutputChannel::create(10 * size_of::<TranscribeResult>()));
+        OutputChannel::create(128 * size_of::<TranscribeResult>()));
         sherpa_pipline.init();
         println!("sherpa pipline-{} init complete", i);
         sherpa_piplines.write().unwrap().push(Arc::new(sherpa_pipline));
@@ -290,7 +290,11 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
                     });
                     
                     tokio::spawn(async move {
-                        let max_error_count = 100 * max_clients;
+                        let max_error_count = 100 + if max_clients < 10 {
+                            0
+                        } else {
+                            (((max_clients - 1) as f32 / 10.0f32) * 100.0f32) as usize
+                        };
                         if let Err(e) = handle_client(&mut socket, sherpa_pipline, max_error_count).await {
                             eprintln!("error handle {:?}: {:?}", socket, e);
                         };
@@ -398,7 +402,9 @@ async fn handle_client(
     while (socket.write_all("end".as_bytes()).await).is_err() {
         sleep(Duration::from_millis(10)).await
     }
-    socket.shutdown().await.unwrap();
+    if let Err(e)  = socket.shutdown().await {
+        eprintln!("error close socket: {:?}", e);
+    }
     sherpa_pipline.end();
     Ok(())
 }
