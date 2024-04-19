@@ -171,17 +171,6 @@ pub(crate) mod buffer {
             self.not_full.notify_one();
             Ok(readed)
         }
-
-        pub(crate) fn clear(&self) {
-            let capacity = self.capacity;
-            let data = self.raw_data.lock().unwrap();
-
-            for idx in 0..capacity {
-                data.set(idx, Zero::zero());
-            }
-            self.front.store(0, Ordering::SeqCst);
-            self.rear.store(0, Ordering::SeqCst);
-        }
     }
 
     unsafe impl<E> Send for IOInnerBuffer<E> { }
@@ -275,10 +264,6 @@ pub(crate) mod channel {
                 },
                 None => Err(ChannelError::ReaderNotFound),
             }
-        }
-
-        pub(crate) fn clear(&self) {
-            self.inner_buffer.clear();
         }
     }
 

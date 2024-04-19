@@ -1,4 +1,4 @@
-use derive_new::new;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -22,8 +22,24 @@ extern "C" {
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, new)]
-pub struct Sherpa;
+#[derive(Debug)]
+pub(crate) struct Sherpa {
+    busy: AtomicBool,
+}
+
+impl Sherpa {
+    pub(crate) fn new() -> Self {
+        Self { busy: AtomicBool::new(false) }
+    }
+
+    pub(crate) fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_busy(&self, available: bool) {
+        self.busy.store(available, Ordering::SeqCst);
+    }
+}
 
 impl Sherpa {
     pub fn init(&self, tokens: &str, encoder: &str, decoder: &str, joiner: &str) -> SherpaHandle {

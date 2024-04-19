@@ -1,5 +1,5 @@
 use core::slice;
-use std::{mem::size_of, sync::{atomic::{AtomicI32, Ordering}, Arc, RwLock}, time::Duration};
+use std::{mem::size_of, sync::{Arc, RwLock}, time::Duration};
 
 use derive_new::new;
 
@@ -50,10 +50,6 @@ impl IOChunk for AudioChunk {
 }
 
 impl AudioChunk {
-    pub(crate) fn is_end(&self) -> bool {
-        self.end_flag == 1
-    }
-
     pub(crate) fn get_payload(&self) -> &[ChannelElem] {
         &self.pay_load
     }
@@ -137,8 +133,17 @@ impl SherpaPipline {
 }
 
 impl SherpaPipline {
+    pub(crate) fn is_busy(&self) -> bool {
+        self.sherpa.is_busy()
+    }
+
+    pub(crate) fn set_busy(&self, available: bool) {
+        self.sherpa.set_busy(available);
+    }
+
     pub(crate) fn init(&mut self) {
-        self.handler = Some(Arc::new(self.sherpa.init(SHERPA_TOKENS, SHERPA_ENCODER, SHERPA_DECODER, SHERPA_JOINER)));
+        self.handler = Some(Arc::new(self.sherpa.init(
+            SHERPA_TOKENS, SHERPA_ENCODER, SHERPA_DECODER, SHERPA_JOINER)));
     }
 
     fn create_transcribe(pay_load: &[u8]) -> TranscribeResult {
@@ -165,12 +170,12 @@ impl SherpaPipline {
 
         tokio::spawn(async move {
             loop {
+                if !sherpa.is_busy() {
+                    on_end(sherpa_id);
+                    break;
+                }
+
                 if let Ok(audio_chunk) = input_channel.read() {
-                    if audio_chunk.is_end() {
-                        println!("notify channel-{} end", sherpa_id);
-                        on_end(sherpa_id);
-                        break;
-                    }
                     let sample = audio_chunk.get_payload()
                         .chunks_exact(2)
                         .map(|chunk| {
@@ -219,18 +224,14 @@ impl SherpaPipline {
         self.input_channel.write(AudioChunk::from_chunk_bytes(&chunk_bytes))
     }
 
-    pub(crate) fn end(&self) -> Result<(), ChannelError> {
+    pub(crate) fn end(&self) {
         println!("channel-{} end", self.sherpa_id);
-        let input_channel = self.input_channel.clone();
-        let output_channel = self.output_channel.clone();
         let sherpa = self.sherpa.clone();
         let handler = self.handler.as_ref().unwrap().clone();
 
         sherpa.reset(*handler);
-        input_channel.clear();
-        output_channel.clear();
+        self.set_busy(false);
         println!("channel-{} end 2", self.sherpa_id);
-        self.write(&[0; CHUNK_PAYLOAD_LEN], 0, true)
     }
 
     pub(crate) fn stop(&self) {
@@ -242,12 +243,6 @@ impl SherpaPipline {
 #[tokio::main(worker_threads = 40)]
 pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn std::error::Error>> {
     let sherpa_piplines = Arc::new(RwLock::new(vec![]));
-    let mut sherpa_pipline_states = Vec::with_capacity(max_clients);
-    for _i in 0..max_clients {
-        sherpa_pipline_states.push(AtomicI32::new(0));
-    }
-
-    let sherpa_pipline_states = Arc::new(sherpa_pipline_states);
 
     for i in 0..max_clients {
         let mut sherpa_pipline = SherpaPipline::new(
@@ -269,50 +264,39 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 println!("client {:?} accepted", socket);
-        
+
                 let available_idx = {
                     let mut available_idx = -1;
-                    for (i, sherpa_pipline_state) in sherpa_pipline_states.iter().enumerate() {
-                        if sherpa_pipline_state.load(Ordering::SeqCst).eq(&0) {
-                            available_idx = i as isize;
+                    let sherpa_piplines = sherpa_piplines.read().unwrap();
+                    for sherpa_pipline in sherpa_piplines.iter() {
+                        available_idx += 1;
+                        if !sherpa_pipline.is_busy() {
                             break;
                         }
                     }
                     available_idx
                 };
-        
-                if available_idx == -1 {
+
+                if available_idx != -1 {
+                    let sherpa_pipline = sherpa_piplines.read().unwrap()[available_idx as usize].clone();
+                    sherpa_pipline.set_busy(true);
+                    sherpa_pipline.run(
+                    move |channel_id, chunk_id, ret| {
+                        println!("notify: {}-{} {}", channel_id, chunk_id, ret);
+                    },
+                    move |sherpa_id| {
+                        println!("free: {sherpa_id}");
+                    });
+                    
+                    tokio::spawn(async move {
+                        let max_error_count = 5 * max_clients;
+                        if let Err(e) = handle_client(&mut socket, sherpa_pipline, max_error_count).await {
+                            eprintln!("error handle {:?}: {:?}", socket, e);
+                        };
+                    });
+                } else {
                     eprintln!("no sherpa_pipline availavle");
                     socket.shutdown().await.unwrap();
-                } else {
-                    sherpa_pipline_states[available_idx as usize].store(1, Ordering::SeqCst);
-                    if let Some(&ref sherpa_pipline) = sherpa_piplines.read().unwrap().get(available_idx as usize) {
-                        let sherpa_pipline = sherpa_pipline.clone();
-        
-                        sherpa_pipline.run(
-                            move |channel_id, chunk_id, ret| {
-                                println!("notify: {}-{} {}", channel_id, chunk_id, ret);
-                            },
-                        {
-                            let sherpa_pipline_states = sherpa_pipline_states.clone();
-                            move |sherpa_id| {
-                                println!("free: {sherpa_id}");
-                                sherpa_pipline_states[sherpa_id].store(0, Ordering::SeqCst);
-                            }
-                        });
-                        
-                        tokio::spawn(async move {
-                            let max_error_count = 100 + if max_clients < 10 {
-                                0
-                            } else {
-                                (((max_clients - 1) as f32 / 10.0f32) * 100.0f32) as usize
-                            };
-                            if let Err(e) = handle_client(available_idx as usize,
-                                &mut socket, sherpa_pipline, max_error_count).await {
-                                println!("error handle {:?}: {:?}", socket, e);
-                            };
-                        });
-                    }
                 }
             }
         })
@@ -355,7 +339,6 @@ enum SherpaError {
 }
 
 async fn handle_client(
-    channel_id: usize,
     socket: &mut tokio::net::TcpStream,
     sherpa_pipline: Arc<SherpaPipline>,
     max_error_count: usize) -> Result<(), ChannelError> {
@@ -415,10 +398,9 @@ async fn handle_client(
     }
 
     while let Err(_) = socket.write_all(&"end".as_bytes()).await {
-        println!("stop channel: {channel_id} failed!");
         sleep(Duration::from_millis(10)).await
     }
     socket.shutdown().await.unwrap();
-    println!("stop channel: {channel_id}");
-    sherpa_pipline.end()
+    sherpa_pipline.end();
+    Ok(())
 }
