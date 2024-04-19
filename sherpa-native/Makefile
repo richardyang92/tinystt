@@ -1,12 +1,12 @@
 GCC = gcc
 RM = rm -rf
-BIN = libsherpa.dylib
+BIN = libsherpa.so
 TEST = sherpa_test
 
 all: clean build install
 
 build:
-	$(GCC) -dynamiclib -o $(BIN) $(shell pkg-config --cflags sherpa-onnx) \
+	$(GCC) -shared -o $(BIN) $(shell pkg-config --cflags sherpa-onnx) \
 	sherpa.c $(shell pkg-config --libs sherpa-onnx)
 
 clean:
