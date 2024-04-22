@@ -303,6 +303,7 @@ pub async fn run(addr: &'static str, max_clients: usize, debug: bool) -> Result<
                         };
 
                         if let Err(e) = handle_client(&mut socket, sherpa_pipline, max_error_count, debug).await {
+
                             eprintln!("error handle {:?}: {:?}", socket, e);
                         };
                     });
