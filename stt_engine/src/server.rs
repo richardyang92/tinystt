@@ -230,6 +230,12 @@ impl SherpaPipline {
         let sherpa = self.sherpa.clone();
         let handler = self.handler.as_ref().unwrap().clone();
 
+        let input_channel = self.input_channel.clone();
+        let output_channel = self.output_channel.clone();
+
+        input_channel.clear();
+        output_channel.clear();
+
         sherpa.reset(*handler);
         self.set_busy(false);
         println!("channel-{} end 2", self.sherpa_id);
@@ -242,7 +248,7 @@ impl SherpaPipline {
 }
 
 #[tokio::main(worker_threads = 40)]
-pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(addr: &'static str, max_clients: usize, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
     let sherpa_piplines = Arc::new(RwLock::new(vec![]));
 
     for i in 0..max_clients {
@@ -296,7 +302,8 @@ pub async fn run(addr: &'static str, max_clients: usize) -> Result<(), Box<dyn s
                             (((max_clients - 1) as f32 / 10.0f32) * 100.0f32) as usize
                         };
 
-                        if let Err(e) = handle_client(&mut socket, sherpa_pipline, max_error_count).await {
+                        if let Err(e) = handle_client(&mut socket, sherpa_pipline, max_error_count, debug).await {
+
                             eprintln!("error handle {:?}: {:?}", socket, e);
                         };
                     });
@@ -344,7 +351,8 @@ enum SherpaError {
 async fn handle_client(
     socket: &mut tokio::net::TcpStream,
     sherpa_pipline: Arc<SherpaPipline>,
-    max_error_count: usize) -> Result<(), ChannelError> {
+    max_error_count: usize,
+    debug: bool) -> Result<(), ChannelError> {
     println!("handle {:?}, allowed max_error_count={}", socket, max_error_count);
     let mut buff_in = [0; CHUNK_PAYLOAD_LEN];
     let mut read_len = 0;
@@ -355,7 +363,9 @@ async fn handle_client(
     loop {
         if error_count > max_error_count {
             eprintln!("transcribe should complete, break");
-            socket.write_all("end".as_bytes()).await.unwrap();
+            if debug {
+                socket.write_all("end".as_bytes()).await.unwrap();
+            }
             break;
         }
         match tokio::select! {
@@ -400,12 +410,14 @@ async fn handle_client(
         }
     }
 
-    while (socket.write_all("end".as_bytes()).await).is_err() {
-        sleep(Duration::from_millis(10)).await
+    sherpa_pipline.end();
+    if debug {
+        while (socket.write_all("end".as_bytes()).await).is_err() {
+            sleep(Duration::from_millis(10)).await
+        }
     }
     if let Err(e)  = socket.shutdown().await {
         eprintln!("error close socket: {:?}", e);
     }
-    sherpa_pipline.end();
     Ok(())
 }

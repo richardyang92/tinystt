@@ -65,6 +65,12 @@ void sherpa_transcribe(SherpaHandle handle, char* result, float* samples, int le
 }
 
 void sherpa_reset(SherpaHandle handle) {
+    float tail_paddings[4800] = { 0 };
+    AcceptWaveform(handle.stream, SAMPLE_RATE, tail_paddings, 4800);
+    InputFinished(handle.stream);
+    while (IsOnlineStreamReady(handle.recognizer, handle.stream)) {
+        DecodeOnlineStream(handle.recognizer, handle.stream);
+    }
     Reset(handle.recognizer, handle.stream);
 }
 
